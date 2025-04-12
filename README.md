@@ -117,6 +117,7 @@ The enhanced version features:
 - **Automatic Restart**: New mazes are generated after each solution
 - **Training Statistics**: Track performance improvement over time
 - **Saved Models**: Trained models are saved to the `models/` directory
+- **Test Mode**: Test what the model has learned without algorithmic fallbacks
 
 Additional options:
 
@@ -132,7 +133,26 @@ python3 t_mazer_enhanced.py --force-text
 
 # Load a specific model
 python3 t_mazer_enhanced.py --load-model models/ternary_solver_YYYYMMDD_HHMMSS.pkl
+
+# Run in test mode (neural network only, no algorithmic fallbacks)
+python3 t_mazer_enhanced.py --test-model
 ```
+
+### Neural Network Test Mode
+
+The test mode allows you to evaluate what the neural network has learned without any algorithmic fallbacks:
+
+```bash
+# Run dedicated test mode
+python3 t_mazer_enhanced.py --test-model
+```
+
+While running in normal mode, you can also:
+- Press the 'T' key to toggle test mode during execution
+- Watch the neural network solve mazes using only what it has learned
+- See statistics about prediction accuracy and success rates
+
+Test mode shows the "pure" learning progress of the neural network, highlighting how well it has internalized the maze-solving task rather than relying on the algorithm.
 
 3. Command-line options:
    ```

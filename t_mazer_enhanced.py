@@ -1338,19 +1338,49 @@ if HAS_PYGAME and HAS_NUMPY:
                 text_surf = self.font.render(line, True, self.COLORS['text'])
                 self.screen.blit(text_surf, (panel_x, panel_y + 30 + i * line_height))
             
+            # Draw test mode stats if available
+            if hasattr(self, '_test_mode_stats'):
+                test_y = panel_y + 30 + len(stats_lines) * line_height + 20
+                test_title = title_font.render("Test Mode Stats", True, (255, 0, 255))  # Purple for test mode
+                self.screen.blit(test_title, (panel_x, test_y))
+                
+                test_lines = [
+                    f"Valid Predictions: {self._test_mode_stats['valid_moves']}",
+                    f"Success Rate: {self._test_mode_stats['success_rate']:.1f}%",
+                    f"Invalid Moves: {self._test_mode_stats['invalid_moves']}",
+                    f"Backtracks: {self._test_mode_stats['backtracks']}"
+                ]
+                
+                for i, line in enumerate(test_lines):
+                    text_surf = self.font.render(line, True, self.COLORS['text'])
+                    self.screen.blit(text_surf, (panel_x, test_y + 30 + i * line_height))
+                
+                instruction_y = test_y + 30 + len(test_lines) * line_height + 20
+            else:
+                instruction_y = panel_y + 30 + len(stats_lines) * line_height + 20
+            
             # Draw instructions
-            instruction_y = panel_y + 30 + len(stats_lines) * line_height + 20
             instructions = [
                 "Press ENTER to restart",
                 "Press SPACE to pause",
+                "Press T to toggle test mode",
                 "Press ESC to exit"
             ]
+            
+            # Add test mode indicator if applicable
+            if hasattr(self, '_test_mode_message'):
+                instructions.append(self._test_mode_message)
             
             instruction_title = title_font.render("Controls", True, self.COLORS['highlight'])
             self.screen.blit(instruction_title, (panel_x, instruction_y))
             
             for i, instr in enumerate(instructions):
-                text_surf = self.font.render(instr, True, self.COLORS['text'])
+                text_color = self.COLORS['text']
+                # Highlight the test mode message if present
+                if instr == self._test_mode_message and "ON" in instr:
+                    text_color = (255, 0, 255)  # Purple for test mode
+                
+                text_surf = self.font.render(instr, True, text_color)
                 self.screen.blit(text_surf, (panel_x, instruction_y + 30 + i * line_height))
             
         def run_training_loop(self, generator, solver, args):
@@ -1365,6 +1395,10 @@ if HAS_PYGAME and HAS_NUMPY:
             solution_path = []
             current_step = 0
             visited = set()
+            test_mode = False  # Flag to toggle test mode
+            
+            # Add to instructions panel
+            self._test_mode_message = "Press T to toggle test mode: OFF"
             
             # Main game loop
             while running:
@@ -1384,9 +1418,19 @@ if HAS_PYGAME and HAS_NUMPY:
                             current_step = 0
                             visited = set()
                             
-                            # Solve the maze
+                            # Solve the maze - with or without test mode
                             start_time = time.time()
-                            solution_path, _ = solver.solve(maze, training_mode=True)
+                            if test_mode:
+                                # In test mode, solve without algorithmic fallbacks
+                                from src.neural_test_mode import NeuralTestModeSolver
+                                test_solver = NeuralTestModeSolver(solver.model)
+                                solution_path, test_stats, success = test_solver.solve(maze)
+                                
+                                # You can display test stats here if desired
+                                self._test_mode_stats = test_stats
+                            else:
+                                # Normal solving with training
+                                solution_path, _ = solver.solve(maze, training_mode=True)
                             end_time = time.time()
                             
                             # Update stats
@@ -1399,13 +1443,29 @@ if HAS_PYGAME and HAS_NUMPY:
                             self.stats['training_steps'] = solver.model.training_steps
                             self.stats['learning_rate'] = solver.model.learning_rate
                             
-                            # Save model periodically
-                            if self.stats['solved'] % 10 == 0:
+                            # Save model periodically (only in training mode)
+                            if not test_mode and self.stats['solved'] % 10 == 0:
                                 solver.model.save()
                         
                         elif event.key == pygame.K_SPACE:
                             # Toggle solving
                             solving = not solving
+                            
+                        elif event.key == pygame.K_t:
+                            # Toggle test mode
+                            test_mode = not test_mode
+                            self._test_mode_message = f"Press T to toggle test mode: {'ON' if test_mode else 'OFF'}"
+                            
+                            # If we're toggling into test mode, show a message
+                            if test_mode:
+                                font = pygame.font.SysFont('Arial', 24, bold=True)
+                                text = font.render("TEST MODE: Using only neural network (no algorithm help)", 
+                                                True, self.COLORS['highlight'])
+                                text_rect = text.get_rect(center=(self.width * (self.cell_size + self.margin) // 2, 
+                                                                self.height * (self.cell_size + self.margin) + 30))
+                                self.screen.blit(text, text_rect)
+                                pygame.display.flip()
+                                pygame.time.wait(1500)  # Show message for 1.5 seconds
                 
                 # Clear screen
                 self.screen.fill(self.COLORS['background'])
@@ -1600,6 +1660,12 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--test-model",
+        action="store_true",
+        help="Test mode: use only the neural network weights, no algorithmic fallbacks"
+    )
+    
+    parser.add_argument(
         "--load-model",
         type=str,
         help="Path to a model file to load"
@@ -1607,12 +1673,68 @@ def parse_args():
     
     return parser.parse_args()
 
+def run_test_mode(args):
+    """Run test mode to evaluate model without algorithmic fallbacks."""
+    # Import the test mode module
+    from src.neural_test_mode import TestModeRunner
+    
+    print("\nT_Mazer - Model Testing Mode (without algorithmic fallbacks)\n")
+    
+    # Choose appropriate generator and model based on dependencies
+    if HAS_NUMPY:
+        # Initialize maze generator
+        generator = NumpyMazeGenerator(
+            width=args.width,
+            height=args.height,
+            complexity=args.complexity,
+            density=args.density
+        )
+        
+        # Initialize model
+        if args.load_model:
+            model = NumpyTernaryModel()
+            if model.load(args.load_model):
+                print(f"Successfully loaded model from {args.load_model}")
+            else:
+                print("Failed to load model, initializing new one")
+        else:
+            # Try to find the latest model file
+            model_files = [f for f in os.listdir(MODEL_DIR) if f.startswith("numpy_ternary_")]
+            if model_files:
+                latest_model = os.path.join(MODEL_DIR, sorted(model_files)[-1])
+                model = NumpyTernaryModel()
+                if model.load(latest_model):
+                    print(f"Loaded latest model from {latest_model}")
+                else:
+                    print("Failed to load model, initializing new one")
+                    model = NumpyTernaryModel()
+            else:
+                print("No existing model found, initializing new one")
+                model = NumpyTernaryModel()
+        
+        # Create test runner
+        runner = TestModeRunner(model, generator, num_mazes=5)
+        
+        # Run test mode with appropriate visualization
+        if HAS_PYGAME and not args.force_text:
+            runner.run_pygame_mode(args)
+        else:
+            runner.run_text_mode(args)
+    else:
+        print("Test mode requires NumPy. Please install NumPy to use this feature.")
+        return
+
 def main():
     """Main application entry point."""
     print("\nT_Mazer Enhanced - With Model Training and Continuous Solving\n")
     
     # Parse command line arguments
     args = parse_args()
+    
+    # Test mode takes precedence if enabled
+    if args.test_model:
+        run_test_mode(args)
+        return
     
     # Determine which version to run
     if args.force_simple:
