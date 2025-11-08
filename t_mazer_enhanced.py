@@ -9,6 +9,7 @@ import random
 import argparse
 import pickle
 import json
+import warnings
 from datetime import datetime
 
 # Try to import pygame and numpy, but handle gracefully if they're not available
@@ -918,16 +919,29 @@ if HAS_NUMPY:
             start = (1, 1)
             end = (maze.shape[0] - 2, maze.shape[1] - 2)
             
+            # Validate start and end are white squares (value 0)
+            if not (0 <= start[0] < maze.shape[0] and 
+                    0 <= start[1] < maze.shape[1] and
+                    maze[start[0], start[1]] == 0):
+                raise ValueError(f"Start position {start} is not a white square (path cell)")
+            if not (0 <= end[0] < maze.shape[0] and 
+                    0 <= end[1] < maze.shape[1] and
+                    maze[end[0], end[1]] == 0):
+                raise ValueError(f"End position {end} is not a white square (path cell)")
+            
             # Direction vectors (right, down, left, up)
             directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
             
-            # Add start position
+            # Add start position (already validated as white square)
             current = start
             self.solution_path.append(current)
             self.visited.add(current)
             
-            # Maximum steps to prevent infinite loops
-            max_steps = maze.shape[0] * maze.shape[1] * 2
+            # Maximum steps to prevent infinite loops (varies based on maze size)
+            # Larger mazes need more steps, but also add some randomness
+            base_max_steps = maze.shape[0] * maze.shape[1] * 2
+            variation = random.uniform(0.8, 1.5)  # Vary max steps each run
+            max_steps = int(base_max_steps * variation)
             steps = 0
             
             while current != end and steps < max_steps:
@@ -964,16 +978,45 @@ if HAS_NUMPY:
                         if unvisited:
                             action, (ny, nx) = random.choice(unvisited)
                         else:
-                            # Backtrack
+                            # Backtrack - but validate the move is valid
                             if len(self.solution_path) > 1:
                                 # Remove current position from path
                                 self.solution_path.pop()
                                 # Get previous position
-                                ny, nx = self.solution_path[-1]
-                                # Try to find the action that led to the previous position
-                                for i, (dy, dx) in enumerate(directions):
-                                    if (ny, nx) == (current[0] + dy, current[1] + dx):
-                                        action = i
+                                prev_pos = self.solution_path[-1]
+                                
+                                # Validate that we can actually move back to previous position
+                                # MUST BE: adjacent, within bounds, AND a white square (value 0)
+                                dy_back = prev_pos[0] - current[0]
+                                dx_back = prev_pos[1] - current[1]
+                                
+                                # Check if prev is adjacent (Manhattan distance = 1) AND is a white square
+                                if (abs(dy_back) + abs(dx_back) == 1 and
+                                    0 <= prev_pos[0] < maze.shape[0] and
+                                    0 <= prev_pos[1] < maze.shape[1] and
+                                    maze[prev_pos[0], prev_pos[1]] == 0):  # MUST be white (0)
+                                    # Valid backtrack to white square
+                                    ny, nx = prev_pos
+                                    # Find the action for backtrack direction
+                                    for i, (dy, dx) in enumerate(directions):
+                                        if (dy, dx) == (dy_back, dx_back):
+                                            action = i
+                                            break
+                                else:
+                                    # Invalid backtrack (not adjacent, out of bounds, or not white), find valid white neighbor
+                                    valid_neighbors = []
+                                    for i, (dy, dx) in enumerate(directions):
+                                        py, px = current[0] + dy, current[1] + dx
+                                        # STRICT: Only allow white squares (value 0)
+                                        if (0 <= py < maze.shape[0] and 
+                                            0 <= px < maze.shape[1] and 
+                                            maze[py, px] == 0):  # MUST be white (0)
+                                            valid_neighbors.append((i, (py, px)))
+                                    
+                                    if valid_neighbors:
+                                        action, (ny, nx) = random.choice(valid_neighbors)
+                                    else:
+                                        # Stuck, can't backtrack or move forward to white squares
                                         break
                     
                     # Train the model if in training mode
@@ -998,7 +1041,24 @@ if HAS_NUMPY:
                     self.previous_state = features
                     self.previous_action = action
                     
-                    # Move to the new position
+                    # CRITICAL VALIDATION: Double-check that target is a white square before adding to path
+                    if not (0 <= ny < maze.shape[0] and 
+                            0 <= nx < maze.shape[1] and
+                            maze[ny, nx] == 0):  # MUST be white (0)
+                        # This should never happen, but safety check prevents cheating
+                        cell_value = maze[ny, nx] if (0 <= ny < maze.shape[0] and 0 <= nx < maze.shape[1]) else "out_of_bounds"
+                        print(f"ERROR: Attempted to move to non-white cell (value={cell_value}) at ({ny}, {nx}), blocking move")
+                        break
+                    
+                    # Check that move is adjacent (prevent jumping through walls)
+                    dy_move = abs(ny - current[0])
+                    dx_move = abs(nx - current[1])
+                    if dy_move + dx_move != 1:
+                        # Invalid move - not adjacent!
+                        print(f"ERROR: Invalid jump from {current} to ({ny}, {nx}), blocking move")
+                        break
+                    
+                    # ALL CHECKS PASSED: Move to the white square
                     current = (ny, nx)
                     self.solution_path.append(current)
                     self.visited.add(current)
@@ -1026,18 +1086,56 @@ if HAS_NUMPY:
                         self.previous_state = features
                         self.previous_action = action
                         
-                        # Move to the new position
+                        # CRITICAL VALIDATION: Ensure target is a white square before moving
+                        if not (0 <= ny < maze.shape[0] and 
+                                0 <= nx < maze.shape[1] and
+                                maze[ny, nx] == 0):  # MUST be white (0)
+                            # Should not happen since we validated above, but double-check
+                            cell_value = maze[ny, nx] if (0 <= ny < maze.shape[0] and 0 <= nx < maze.shape[1]) else "out_of_bounds"
+                            print(f"ERROR: Attempted to move to non-white cell (value={cell_value}) at ({ny}, {nx}), blocking move")
+                            break
+                        
+                        # ALL CHECKS PASSED: Move to the white square
                         current = (ny, nx)
                         self.solution_path.append(current)
                         self.visited.add(current)
                     
                     else:
-                        # No valid moves, backtrack
+                        # No valid moves, backtrack to a white square
                         if len(self.solution_path) > 1:
                             # Remove current position from path
                             self.solution_path.pop()
-                            # Get previous position
-                            current = self.solution_path[-1]
+                            # Get previous position and validate it's a white square
+                            prev_pos = self.solution_path[-1]
+                            
+                            # Validate prev_pos is a white square (value 0) before backtracking
+                            if (0 <= prev_pos[0] < maze.shape[0] and
+                                0 <= prev_pos[1] < maze.shape[1] and
+                                maze[prev_pos[0], prev_pos[1]] == 0):  # MUST be white (0)
+                                current = prev_pos
+                            else:
+                                # Previous position is not white, find any valid white neighbor
+                                valid_backtrack = []
+                                for dy, dx in directions:
+                                    py, px = current[0] + dy, current[1] + dx
+                                    if (0 <= py < maze.shape[0] and
+                                        0 <= px < maze.shape[1] and
+                                        maze[py, px] == 0):  # MUST be white (0)
+                                        valid_backtrack.append((py, px))
+                                
+                                if valid_backtrack:
+                                    current = valid_backtrack[0]  # Move to first valid white square
+                                    # Final check: ensure it's actually white before adding
+                                    if (0 <= current[0] < maze.shape[0] and
+                                        0 <= current[1] < maze.shape[1] and
+                                        maze[current[0], current[1]] == 0):
+                                        self.solution_path.append(current)
+                                        self.visited.add(current)
+                                    else:
+                                        break  # Safety: should never happen, but prevent cheating
+                                else:
+                                    # Completely stuck, break out
+                                    break
                 
                 steps += 1
             
@@ -1232,6 +1330,26 @@ if HAS_PYGAME and HAS_NUMPY:
                 'training_steps': 0,
                 'learning_rate': 0.01
             }
+        
+        def _get_font(self, size=14, bold=False):
+            """Safely get a font, returning None if fonts are not available."""
+            if self.font is None:
+                return None
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    warnings.filterwarnings("ignore", module="pygame.font")
+                    font_module = getattr(pygame, 'font', None)
+                    if font_module is not None:
+                        sysfont = getattr(font_module, 'SysFont', None)
+                        if sysfont is not None:
+                            try:
+                                return sysfont('Arial', size, bold=bold)
+                            except (NotImplementedError, ImportError, AttributeError, TypeError):
+                                pass
+            except (NotImplementedError, ImportError, AttributeError, TypeError):
+                pass
+            return None
             
         def initialize(self, maze, stats=None):
             """Initialize the pygame window based on maze dimensions."""
@@ -1263,7 +1381,25 @@ if HAS_PYGAME and HAS_NUMPY:
             self.screen = pygame.display.set_mode((window_width, window_height))
             pygame.display.set_caption("T_Mazer - Training Mode")
             self.clock = pygame.time.Clock()
-            self.font = pygame.font.SysFont('Arial', 14)
+            
+            # Initialize font with error handling
+            self.font = None
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                warnings.filterwarnings("ignore", module="pygame.font")
+                try:
+                    if hasattr(pygame, 'font'):
+                        font_module = getattr(pygame, 'font', None)
+                        if font_module is not None:
+                            sysfont = getattr(font_module, 'SysFont', None)
+                            if sysfont is not None:
+                                try:
+                                    self.font = sysfont('Arial', 14)
+                                except (NotImplementedError, ImportError, AttributeError, TypeError):
+                                    pass
+                except (NotImplementedError, ImportError, AttributeError, TypeError):
+                    pass
+            
             self.is_initialized = True
             
         def draw_maze(self, visited=None, solution_path=None, current_pos=None):
@@ -1329,20 +1465,23 @@ if HAS_PYGAME and HAS_NUMPY:
             ]
             
             # Draw title
-            title_font = pygame.font.SysFont('Arial', 18, bold=True)
-            title_surf = title_font.render("T_Mazer Stats", True, self.COLORS['highlight'])
-            self.screen.blit(title_surf, (panel_x, panel_y))
+            title_font = self._get_font(18, bold=True)
+            if title_font:
+                title_surf = title_font.render("T_Mazer Stats", True, self.COLORS['highlight'])
+                self.screen.blit(title_surf, (panel_x, panel_y))
             
             # Draw stats lines
             for i, line in enumerate(stats_lines):
-                text_surf = self.font.render(line, True, self.COLORS['text'])
-                self.screen.blit(text_surf, (panel_x, panel_y + 30 + i * line_height))
+                if self.font:
+                    text_surf = self.font.render(line, True, self.COLORS['text'])
+                    self.screen.blit(text_surf, (panel_x, panel_y + 30 + i * line_height))
             
             # Draw test mode stats if available
             if hasattr(self, '_test_mode_stats'):
                 test_y = panel_y + 30 + len(stats_lines) * line_height + 20
-                test_title = title_font.render("Test Mode Stats", True, (255, 0, 255))  # Purple for test mode
-                self.screen.blit(test_title, (panel_x, test_y))
+                if title_font:
+                    test_title = title_font.render("Test Mode Stats", True, (255, 0, 255))  # Purple for test mode
+                    self.screen.blit(test_title, (panel_x, test_y))
                 
                 test_lines = [
                     f"Valid Predictions: {self._test_mode_stats['valid_moves']}",
@@ -1352,8 +1491,9 @@ if HAS_PYGAME and HAS_NUMPY:
                 ]
                 
                 for i, line in enumerate(test_lines):
-                    text_surf = self.font.render(line, True, self.COLORS['text'])
-                    self.screen.blit(text_surf, (panel_x, test_y + 30 + i * line_height))
+                    if self.font:
+                        text_surf = self.font.render(line, True, self.COLORS['text'])
+                        self.screen.blit(text_surf, (panel_x, test_y + 30 + i * line_height))
                 
                 instruction_y = test_y + 30 + len(test_lines) * line_height + 20
             else:
@@ -1371,17 +1511,19 @@ if HAS_PYGAME and HAS_NUMPY:
             if hasattr(self, '_test_mode_message'):
                 instructions.append(self._test_mode_message)
             
-            instruction_title = title_font.render("Controls", True, self.COLORS['highlight'])
-            self.screen.blit(instruction_title, (panel_x, instruction_y))
+            if title_font:
+                instruction_title = title_font.render("Controls", True, self.COLORS['highlight'])
+                self.screen.blit(instruction_title, (panel_x, instruction_y))
             
             for i, instr in enumerate(instructions):
-                text_color = self.COLORS['text']
-                # Highlight the test mode message if present
-                if instr == self._test_mode_message and "ON" in instr:
-                    text_color = (255, 0, 255)  # Purple for test mode
-                
-                text_surf = self.font.render(instr, True, text_color)
-                self.screen.blit(text_surf, (panel_x, instruction_y + 30 + i * line_height))
+                if self.font:
+                    text_color = self.COLORS['text']
+                    # Highlight the test mode message if present
+                    if instr == self._test_mode_message and "ON" in instr:
+                        text_color = (255, 0, 255)  # Purple for test mode
+                    
+                    text_surf = self.font.render(instr, True, text_color)
+                    self.screen.blit(text_surf, (panel_x, instruction_y + 30 + i * line_height))
             
         def run_training_loop(self, generator, solver, args):
             """Run continuous training loop with maze generation and solving."""
@@ -1458,14 +1600,15 @@ if HAS_PYGAME and HAS_NUMPY:
                             
                             # If we're toggling into test mode, show a message
                             if test_mode:
-                                font = pygame.font.SysFont('Arial', 24, bold=True)
-                                text = font.render("TEST MODE: Using only neural network (no algorithm help)", 
-                                                True, self.COLORS['highlight'])
-                                text_rect = text.get_rect(center=(self.width * (self.cell_size + self.margin) // 2, 
-                                                                self.height * (self.cell_size + self.margin) + 30))
-                                self.screen.blit(text, text_rect)
-                                pygame.display.flip()
-                                pygame.time.wait(1500)  # Show message for 1.5 seconds
+                                font = self._get_font(24, bold=True)
+                                if font:
+                                    text = font.render("TEST MODE: Using only neural network (no algorithm help)", 
+                                                    True, self.COLORS['highlight'])
+                                    text_rect = text.get_rect(center=(self.width * (self.cell_size + self.margin) // 2, 
+                                                                    self.height * (self.cell_size + self.margin) + 30))
+                                    self.screen.blit(text, text_rect)
+                                    pygame.display.flip()
+                                    pygame.time.wait(1500)  # Show message for 1.5 seconds
                 
                 # Clear screen
                 self.screen.fill(self.COLORS['background'])
@@ -1484,12 +1627,13 @@ if HAS_PYGAME and HAS_NUMPY:
                     # If we've reached the end, wait a bit
                     if current_step >= len(solution_path):
                         # Display completion message
-                        font = pygame.font.SysFont('Arial', 24, bold=True)
-                        text = font.render("Maze Solved! Press ENTER for new maze", True, self.COLORS['highlight'])
-                        text_rect = text.get_rect(center=(self.width * (self.cell_size + self.margin) // 2, 
-                                                          self.height * (self.cell_size + self.margin) + 30))
-                        self.screen.blit(text, text_rect)
-                        pygame.display.flip()
+                        font = self._get_font(24, bold=True)
+                        if font:
+                            text = font.render("Maze Solved! Press ENTER for new maze", True, self.COLORS['highlight'])
+                            text_rect = text.get_rect(center=(self.width * (self.cell_size + self.margin) // 2, 
+                                                              self.height * (self.cell_size + self.margin) + 30))
+                            self.screen.blit(text, text_rect)
+                            pygame.display.flip()
                         
                         # Wait a bit
                         pygame.time.wait(1000)

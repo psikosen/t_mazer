@@ -154,6 +154,71 @@ While running in normal mode, you can also:
 
 Test mode shows the "pure" learning progress of the neural network, highlighting how well it has internalized the maze-solving task rather than relying on the algorithm.
 
+## SPICE Mode: Self-Play with Reflection and Optimization
+
+Inspired by the SPICE (Self-Play In Corpus Environments) paper, T_Mazer now includes advanced self-improvement capabilities:
+
+### Features
+
+- **Self-Reflection**: The model analyzes its own performance, identifying weaknesses and inefficiencies
+- **Self-Optimization**: Automatic parameter tuning based on reflection insights
+- **Self-Play**: Models compete against themselves and previous versions to improve
+- **Advanced Maze Generation**: Adaptive difficulty that adjusts based on solver performance
+
+### Running SPICE Mode
+
+```bash
+# Basic SPICE training
+python3 t_mazer_spice.py
+
+# Customize training
+python3 t_mazer_spice.py --episodes 200 --complexity 0.6
+
+# Adjust self-play frequency
+python3 t_mazer_spice.py --self-play-frequency 10
+
+# Load existing model
+python3 t_mazer_spice.py --load-model models/spice_ternary_*.pkl
+```
+
+### SPICE Command-Line Options
+
+```bash
+--width WIDTH              Base maze width (default: 20)
+--height HEIGHT            Base maze height (default: 20)
+--complexity FLOAT         Initial complexity 0.0-1.0 (default: 0.5)
+--episodes N               Number of training episodes (default: 100)
+--learning-rate FLOAT      Initial learning rate (default: 0.01)
+--exploration-rate FLOAT   Initial exploration rate (default: 0.3)
+--self-play-frequency N    Run self-play every N episodes (default: 5)
+--save-frequency N         Save model every N episodes (default: 10)
+--load-model PATH          Path to model file to load
+```
+
+### How SPICE Works
+
+1. **Self-Reflection**: After each maze-solving attempt, the system analyzes:
+   - Path efficiency (how close to optimal)
+   - Dead-end encounters
+   - Direction changes and zigzagging
+   - Overall performance metrics
+
+2. **Self-Optimization**: Based on reflection insights, the system automatically adjusts:
+   - Learning rate (increase if improving, decrease if declining)
+   - Exploration rate (reduce if excessive backtracking)
+   - Reward weights (emphasize weaknesses)
+   - Training focus areas
+
+3. **Self-Play**: Periodically, the model creates variants of itself and competes:
+   - Creates mutated versions with small weight variations
+   - Competes on the same maze
+   - Learns from better-performing variants
+
+4. **Adaptive Maze Generation**: Maze difficulty automatically adjusts:
+   - Increases if solver performs well (>80% efficiency)
+   - Decreases if solver struggles (<40% efficiency)
+   - Adds challenging features (dead ends, bottlenecks) based on complexity
+
 3. Command-line options:
    ```
    # Generate a larger maze

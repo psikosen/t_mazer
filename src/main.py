@@ -123,15 +123,19 @@ def main():
         # Keep the window open until the user closes it
         print("Close the window to exit")
         try:
-            while True:
+            while gui.is_initialized:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         raise KeyboardInterrupt
+                # Tick the clock to maintain consistent frame rate
+                if gui.clock:
+                    gui.clock.tick(60)
                 time.sleep(0.1)
         except (KeyboardInterrupt, SystemExit):
             pass
         finally:
-            gui.close()
+            if gui.is_initialized:
+                gui.close()
 
 
 if __name__ == "__main__":

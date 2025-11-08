@@ -4,6 +4,7 @@ GUI module for visualizing maze generation and solving.
 import pygame
 import numpy as np
 import time
+import warnings
 
 
 class MazeGUI:
@@ -55,12 +56,47 @@ class MazeGUI:
         window_width = width * (self.cell_size + self.margin) + self.margin
         window_height = height * (self.cell_size + self.margin) + self.margin
         
-        # Initialize pygame
-        pygame.init()
+        # Initialize pygame (safe to call multiple times)
+        try:
+            # pygame.get_init() is available in pygame 2.0+
+            if not pygame.get_init():
+                pygame.init()
+        except AttributeError:
+            # Fallback for older pygame versions
+            pygame.init()
+        
+        # If display already exists, close it first
+        if self.screen is not None:
+            pygame.display.quit()
+        
+        # Create new display
         self.screen = pygame.display.set_mode((window_width, window_height))
         pygame.display.set_caption("T_Mazer - Ternary Fair Play Maze Solver")
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont('Arial', 12)
+        
+        # Initialize font with error handling (optional - not currently used)
+        # Font is kept for potential future use (e.g., text labels)
+        # Note: Font module may not be available on all pygame installations
+        self.font = None
+        # Suppress warnings during font initialization attempt
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            warnings.filterwarnings("ignore", module="pygame.font")
+            try:
+                # Use getattr to check for font module without triggering errors
+                font_module = getattr(pygame, 'font', None)
+                if font_module is not None:
+                    # Try to get SysFont function
+                    sysfont = getattr(font_module, 'SysFont', None)
+                    if sysfont is not None:
+                        try:
+                            self.font = sysfont('Arial', 12)
+                        except (NotImplementedError, ImportError, AttributeError, TypeError):
+                            pass
+            except (NotImplementedError, ImportError, AttributeError, TypeError):
+                # Font module not available - this is fine
+                pass
+        
         self.is_initialized = True
         
     def draw_maze(self, visited=None, solution_path=None, current_pos=None):
@@ -125,8 +161,10 @@ class MazeGUI:
             list: Final solution path
             list: Reasoning tokens used
         """
-        # Initialize GUI if needed
-        if not self.is_initialized or self.maze is not maze:
+        # Initialize GUI if needed (check shape instead of object identity)
+        if (not self.is_initialized or 
+            self.maze is None or 
+            self.maze.shape != maze.shape):
             self.initialize(maze)
         
         # Get the full solution first
@@ -150,7 +188,7 @@ class MazeGUI:
             # Process any pending events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    pygame.quit()
+                    self.close()
                     return None, None
             
             # Pause to make visualization visible
@@ -164,5 +202,14 @@ class MazeGUI:
     def close(self):
         """Close the GUI and clean up resources."""
         if self.is_initialized:
-            pygame.quit()
-            self.is_initialized = False
+            try:
+                if self.screen is not None:
+                    pygame.display.quit()
+                pygame.quit()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            finally:
+                self.screen = None
+                self.clock = None
+                self.font = None
+                self.is_initialized = False
