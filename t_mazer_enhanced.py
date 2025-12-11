@@ -715,86 +715,134 @@ if HAS_NUMPY:
             return False
     
     class NumpyTernaryModel:
-        """Neural network model with ternary weights for maze solving."""
+        """Neural network model with ternary weights for maze solving.
         
-        def __init__(self, input_size=7, hidden_size=16, output_size=4, learning_rate=0.01):
+        IMPROVED: Larger hidden layer (64 neurons), two hidden layers,
+        better ternarization strategy, and momentum-based updates.
+        """
+        
+        def __init__(self, input_size=25, hidden_size=64, output_size=4, learning_rate=0.01):
+            """
+            Initialize the model with improved architecture.
+            
+            Args:
+                input_size: Number of input features (increased from 7 to 25)
+                hidden_size: Neurons in hidden layers (increased from 16 to 64)
+                output_size: Number of actions (4 directions)
+                learning_rate: Initial learning rate
+            """
             self.input_size = input_size
             self.hidden_size = hidden_size
+            self.hidden2_size = 32  # Second hidden layer
             self.output_size = output_size
             self.learning_rate = learning_rate
             
-            # Initialize weights
+            # Initialize weights with Xavier initialization for better gradients
+            scale1 = np.sqrt(2.0 / (input_size + hidden_size))
+            scale2 = np.sqrt(2.0 / (hidden_size + self.hidden2_size))
+            scale3 = np.sqrt(2.0 / (self.hidden2_size + output_size))
+            
             self.weights = {
-                'w1': np.random.randn(input_size, hidden_size) * 0.01,
-                'w2': np.random.randn(hidden_size, output_size) * 0.01,
+                'w1': np.random.randn(input_size, hidden_size) * scale1,
+                'w2': np.random.randn(hidden_size, self.hidden2_size) * scale2,
+                'w3': np.random.randn(self.hidden2_size, output_size) * scale3,
                 'b1': np.zeros((1, hidden_size)),
-                'b2': np.zeros((1, output_size))
+                'b2': np.zeros((1, self.hidden2_size)),
+                'b3': np.zeros((1, output_size))
             }
             
-            # Ternarize weights
-            self._ternarize_weights()
+            # Momentum for smoother updates
+            self.momentum = {
+                'w1': np.zeros_like(self.weights['w1']),
+                'w2': np.zeros_like(self.weights['w2']),
+                'w3': np.zeros_like(self.weights['w3']),
+                'b1': np.zeros_like(self.weights['b1']),
+                'b2': np.zeros_like(self.weights['b2']),
+                'b3': np.zeros_like(self.weights['b3'])
+            }
+            self.momentum_beta = 0.9
+            
+            # Don't ternarize immediately - let weights develop first
+            self._ternary_weights = None  # Cache for ternary weights
             
             # Training history
             self.history = []
             self.training_steps = 0
+            
+            # Experience replay buffer
+            self.replay_buffer = []
+            self.replay_buffer_size = 1000
+            self.batch_size = 32
         
         def _ternarize_weights(self):
-            """Convert weights to ternary values {-1, 0, 1}."""
-            for key in ['w1', 'w2']:
-                # Thresholding approach
-                threshold = 0.3 * np.mean(np.abs(self.weights[key]))
+            """Convert weights to ternary values {-1, 0, 1}.
+            
+            IMPROVED: Use adaptive thresholding per layer and cache results.
+            Only ternarize after sufficient training.
+            """
+            if self.training_steps < 100:
+                # Don't ternarize early - let weights develop
+                return
+            
+            self._ternary_weights = {}
+            for key in ['w1', 'w2', 'w3']:
+                # Adaptive threshold based on weight distribution
+                abs_weights = np.abs(self.weights[key])
+                threshold = 0.4 * np.std(abs_weights) + 0.1 * np.mean(abs_weights)
                 
                 # Create ternary weights
-                weights = np.zeros_like(self.weights[key])
-                weights[self.weights[key] > threshold] = 1
-                weights[self.weights[key] < -threshold] = -1
+                ternary = np.zeros_like(self.weights[key])
+                ternary[self.weights[key] > threshold] = 1
+                ternary[self.weights[key] < -threshold] = -1
                 
-                # Store ternary weights
-                self.weights[key] = weights
+                self._ternary_weights[key] = ternary
+        
+        def _get_effective_weights(self, key):
+            """Get weights for forward pass (ternary if available, else full precision)."""
+            if self._ternary_weights is not None and key in self._ternary_weights:
+                return self._ternary_weights[key]
+            return self.weights[key]
         
         def forward(self, X):
-            """Forward pass through the network."""
+            """Forward pass through the network with 3 layers."""
             # First layer
-            z1 = np.dot(X, self.weights['w1']) + self.weights['b1']
+            z1 = np.dot(X, self._get_effective_weights('w1')) + self.weights['b1']
             a1 = np.maximum(0, z1)  # ReLU
             
-            # Second layer
-            z2 = np.dot(a1, self.weights['w2']) + self.weights['b2']
+            # Second layer  
+            z2 = np.dot(a1, self._get_effective_weights('w2')) + self.weights['b2']
+            a2 = np.maximum(0, z2)  # ReLU
             
-            return z2, a1, z1
+            # Third/output layer
+            z3 = np.dot(a2, self._get_effective_weights('w3')) + self.weights['b3']
+            
+            return z3, (a1, a2), (z1, z2, z3)
         
         def train(self, X, target_output, reward=1.0):
-            """Train the model on a single example."""
+            """Train the model with experience replay and momentum updates.
+            
+            IMPROVED: 3-layer backprop, momentum, experience replay, 
+            and less frequent ternarization.
+            """
             self.training_steps += 1
             
-            # Forward pass
-            current_output, a1, z1 = self.forward(X)
+            # Add to replay buffer
+            self.replay_buffer.append((X.copy(), target_output, reward))
+            if len(self.replay_buffer) > self.replay_buffer_size:
+                self.replay_buffer.pop(0)
             
-            # Adjust target based on reward
-            target = np.zeros((1, self.output_size))
-            target[0, target_output] = reward
+            # Train on current example
+            loss = self._train_single(X, target_output, reward)
             
-            # Compute loss
-            loss = np.mean((current_output - target)**2)
+            # Experience replay: train on random batch from buffer
+            if len(self.replay_buffer) >= self.batch_size and self.training_steps % 5 == 0:
+                indices = np.random.choice(len(self.replay_buffer), self.batch_size, replace=False)
+                for idx in indices:
+                    bX, b_target, b_reward = self.replay_buffer[idx]
+                    self._train_single(bX, b_target, b_reward, record_history=False)
             
-            # Backward pass (simplified)
-            dz2 = 2 * (current_output - target) / X.shape[0]
-            dw2 = np.dot(a1.T, dz2)
-            db2 = np.sum(dz2, axis=0, keepdims=True)
-            
-            da1 = np.dot(dz2, self.weights['w2'].T)
-            dz1 = da1 * (z1 > 0)  # ReLU derivative
-            dw1 = np.dot(X.T, dz1)
-            db1 = np.sum(dz1, axis=0, keepdims=True)
-            
-            # Update weights
-            self.weights['w1'] -= self.learning_rate * dw1
-            self.weights['w2'] -= self.learning_rate * dw2
-            self.weights['b1'] -= self.learning_rate * db1
-            self.weights['b2'] -= self.learning_rate * db2
-            
-            # Ternarize weights periodically
-            if self.training_steps % 10 == 0:
+            # Ternarize weights less frequently (every 50 steps instead of 10)
+            if self.training_steps % 50 == 0:
                 self._ternarize_weights()
             
             # Record history
@@ -803,6 +851,74 @@ if HAS_NUMPY:
                 'reward': float(reward),
                 'steps': self.training_steps
             })
+            
+            return loss
+        
+        def _train_single(self, X, target_output, reward, record_history=True):
+            """Train on a single example with 3-layer backprop and momentum."""
+            # Forward pass
+            current_output, (a1, a2), (z1, z2, z3) = self.forward(X)
+            
+            # Clip outputs to prevent overflow (numerical stability)
+            current_output = np.clip(current_output, -10, 10)
+            
+            # Adjust target based on reward (clip reward too)
+            reward = np.clip(reward, -2, 2)
+            target = np.zeros((1, self.output_size))
+            target[0, target_output] = reward
+            
+            # Compute loss with numerical stability
+            diff = np.clip(current_output - target, -10, 10)
+            loss = np.mean(diff ** 2)
+            
+            # Backward pass through 3 layers
+            # Output layer gradient
+            dz3 = 2 * (current_output - target) / X.shape[0]
+            dw3 = np.dot(a2.T, dz3)
+            db3 = np.sum(dz3, axis=0, keepdims=True)
+            
+            # Second hidden layer gradient
+            da2 = np.dot(dz3, self.weights['w3'].T)
+            dz2 = da2 * (z2 > 0)  # ReLU derivative
+            dw2 = np.dot(a1.T, dz2)
+            db2 = np.sum(dz2, axis=0, keepdims=True)
+            
+            # First hidden layer gradient
+            da1 = np.dot(dz2, self.weights['w2'].T)
+            dz1 = da1 * (z1 > 0)  # ReLU derivative
+            dw1 = np.dot(X.T, dz1)
+            db1 = np.sum(dz1, axis=0, keepdims=True)
+            
+            # Gradient clipping to prevent explosion
+            max_grad = 1.0
+            dw1 = np.clip(dw1, -max_grad, max_grad)
+            dw2 = np.clip(dw2, -max_grad, max_grad)
+            dw3 = np.clip(dw3, -max_grad, max_grad)
+            db1 = np.clip(db1, -max_grad, max_grad)
+            db2 = np.clip(db2, -max_grad, max_grad)
+            db3 = np.clip(db3, -max_grad, max_grad)
+            
+            # Update with momentum
+            self.momentum['w1'] = self.momentum_beta * self.momentum['w1'] + (1 - self.momentum_beta) * dw1
+            self.momentum['w2'] = self.momentum_beta * self.momentum['w2'] + (1 - self.momentum_beta) * dw2
+            self.momentum['w3'] = self.momentum_beta * self.momentum['w3'] + (1 - self.momentum_beta) * dw3
+            self.momentum['b1'] = self.momentum_beta * self.momentum['b1'] + (1 - self.momentum_beta) * db1
+            self.momentum['b2'] = self.momentum_beta * self.momentum['b2'] + (1 - self.momentum_beta) * db2
+            self.momentum['b3'] = self.momentum_beta * self.momentum['b3'] + (1 - self.momentum_beta) * db3
+            
+            # Apply updates
+            self.weights['w1'] -= self.learning_rate * self.momentum['w1']
+            self.weights['w2'] -= self.learning_rate * self.momentum['w2']
+            self.weights['w3'] -= self.learning_rate * self.momentum['w3']
+            self.weights['b1'] -= self.learning_rate * self.momentum['b1']
+            self.weights['b2'] -= self.learning_rate * self.momentum['b2']
+            self.weights['b3'] -= self.learning_rate * self.momentum['b3']
+            
+            # Weight clipping to prevent explosion (every 10 steps)
+            if self.training_steps % 10 == 0:
+                max_weight = 5.0
+                for key in ['w1', 'w2', 'w3']:
+                    self.weights[key] = np.clip(self.weights[key], -max_weight, max_weight)
             
             return loss
         
@@ -819,12 +935,16 @@ if HAS_NUMPY:
             
             data = {
                 'weights': self.weights,
-                'history': self.history,
+                'momentum': self.momentum,
+                'history': self.history[-1000:],  # Keep last 1000 entries to save space
                 'training_steps': self.training_steps,
                 'input_size': self.input_size,
                 'hidden_size': self.hidden_size,
+                'hidden2_size': self.hidden2_size,
                 'output_size': self.output_size,
-                'learning_rate': self.learning_rate
+                'learning_rate': self.learning_rate,
+                'replay_buffer': self.replay_buffer[-500:],  # Keep last 500 experiences
+                'version': 2  # Version number for compatibility
             }
             
             # Ensure directory exists
@@ -837,18 +957,34 @@ if HAS_NUMPY:
             return filename
         
         def load(self, filename):
-            """Load model from a file."""
+            """Load model from a file with backward compatibility."""
             try:
                 with open(filename, 'rb') as f:
                     data = pickle.load(f)
                 
-                self.weights = data['weights']
-                self.history = data['history']
-                self.training_steps = data['training_steps']
-                self.input_size = data['input_size']
-                self.hidden_size = data['hidden_size']
-                self.output_size = data['output_size']
-                self.learning_rate = data['learning_rate']
+                # Check version for compatibility
+                version = data.get('version', 1)
+                
+                if version >= 2:
+                    # New format with 3 layers
+                    self.weights = data['weights']
+                    self.momentum = data.get('momentum', self.momentum)
+                    self.history = data['history']
+                    self.training_steps = data['training_steps']
+                    self.input_size = data['input_size']
+                    self.hidden_size = data['hidden_size']
+                    self.hidden2_size = data.get('hidden2_size', 32)
+                    self.output_size = data['output_size']
+                    self.learning_rate = data['learning_rate']
+                    self.replay_buffer = data.get('replay_buffer', [])
+                else:
+                    # Old format - need to reinitialize with new architecture
+                    print(f"Loading old model format, reinitializing architecture...")
+                    old_steps = data.get('training_steps', 0)
+                    self.training_steps = old_steps
+                    self.history = data.get('history', [])
+                    # Keep the new architecture, old weights are incompatible
+                    print(f"Note: Old weights discarded due to architecture change")
                 
                 print(f"Model loaded from {filename}")
                 print(f"Model has been trained for {self.training_steps} steps")
@@ -859,7 +995,10 @@ if HAS_NUMPY:
                 return False
     
     class NumpyTrainableSolver:
-        """Numpy-based maze solver with neural network training."""
+        """Numpy-based maze solver with neural network training.
+        
+        IMPROVED: Better reward shaping, BFS distance caching, exploration bonuses.
+        """
         
         def __init__(self):
             # Initialize neural network model
@@ -868,28 +1007,175 @@ if HAS_NUMPY:
             self.visited = set()
             self.previous_state = None
             self.previous_action = None
+            self._bfs_distance_cache = {}  # Cache BFS distances for efficiency
+        
+        def _calculate_reward(self, old_pos, new_pos, goal, maze, is_new_cell=True):
+            """Calculate improved reward based on actual maze structure.
+            
+            IMPROVED: Uses BFS distance (accounts for walls), exploration bonus,
+            and shaped rewards for better learning.
+            """
+            # Reached the goal - big reward!
+            if new_pos == goal:
+                return 1.5  # Increased from 1.0
+            
+            # Calculate BFS distances (accounts for walls)
+            old_dist = self._get_bfs_distance(old_pos, goal, maze)
+            new_dist = self._get_bfs_distance(new_pos, goal, maze)
+            
+            reward = 0.0
+            
+            # Distance-based reward (using actual path distance, not Manhattan)
+            if old_dist is not None and new_dist is not None:
+                if new_dist < old_dist:
+                    # Getting closer through actual paths
+                    reward += 0.3 + 0.1 * (old_dist - new_dist)  # Bonus for progress
+                elif new_dist > old_dist:
+                    # Getting farther
+                    reward -= 0.15
+                else:
+                    # Same distance - slightly negative to encourage progress
+                    reward -= 0.05
+            else:
+                # No valid path found - this shouldn't happen often
+                reward -= 0.2
+            
+            # Exploration bonus - reward visiting new cells
+            if is_new_cell:
+                reward += 0.1  # Small bonus for exploration
+            else:
+                reward -= 0.1  # Penalty for revisiting
+            
+            # Clip reward to reasonable range
+            return np.clip(reward, -0.5, 1.0)
+        
+        def _get_bfs_distance(self, start, goal, maze):
+            """Get BFS distance from start to goal, with caching.
+            
+            Returns actual path distance accounting for walls.
+            """
+            cache_key = (start, goal)
+            if cache_key in self._bfs_distance_cache:
+                return self._bfs_distance_cache[cache_key]
+            
+            # BFS to find shortest path
+            from collections import deque
+            queue = deque([(start, 0)])
+            visited = {start}
+            
+            while queue:
+                pos, dist = queue.popleft()
+                
+                if pos == goal:
+                    self._bfs_distance_cache[cache_key] = dist
+                    return dist
+                
+                # Try all four directions
+                for dy, dx in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                    ny, nx = pos[0] + dy, pos[1] + dx
+                    
+                    if (0 <= ny < maze.shape[0] and 
+                        0 <= nx < maze.shape[1] and 
+                        maze[ny, nx] == 0 and
+                        (ny, nx) not in visited):
+                        queue.append(((ny, nx), dist + 1))
+                        visited.add((ny, nx))
+            
+            # No path found
+            self._bfs_distance_cache[cache_key] = None
+            return None
+        
+        def _clear_distance_cache(self):
+            """Clear the BFS distance cache (call when maze changes)."""
+            self._bfs_distance_cache = {}
         
         def _get_features(self, maze, position, target):
-            """Extract features from the current state."""
+            """Extract rich features from the current state.
+            
+            IMPROVED: 25 features including:
+            - 4 immediate movement options
+            - 4 features for 2-step lookahead
+            - 9 features for 3x3 local view
+            - 4 directional features (toward/away from goal)
+            - 2 normalized distance features
+            - 1 progress feature
+            - 1 bias
+            """
             y, x = position
             height, width = maze.shape
+            ty, tx = target
             
-            # Features array
-            features = np.zeros((1, 7))
+            # Features array (25 features)
+            features = np.zeros((1, 25))
+            idx = 0
             
-            # Wall features (can we move in each direction?)
-            for i, (dy, dx) in enumerate([(0, 1), (1, 0), (0, -1), (-1, 0)]):
+            # Feature 0-3: Immediate movement options (can we move in each direction?)
+            directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]  # right, down, left, up
+            for i, (dy, dx) in enumerate(directions):
                 ny, nx = y + dy, x + dx
                 if 0 <= ny < height and 0 <= nx < width and maze[ny, nx] == 0:
-                    features[0, i] = 1  # Can move in this direction
+                    features[0, idx] = 1  # Can move
+                idx += 1
             
-            # Direction to target
-            ty, tx = target
-            features[0, 4] = (ty - y) / height  # Normalized y direction
-            features[0, 5] = (tx - x) / width   # Normalized x direction
+            # Feature 4-7: Two-step lookahead (is there a path after the immediate move?)
+            for dy, dx in directions:
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < height and 0 <= nx < width and maze[ny, nx] == 0:
+                    # Count open paths from that position
+                    open_count = 0
+                    for ddy, ddx in directions:
+                        nny, nnx = ny + ddy, nx + ddx
+                        if 0 <= nny < height and 0 <= nnx < width and maze[nny, nnx] == 0:
+                            open_count += 1
+                    features[0, idx] = open_count / 4.0  # Normalized
+                idx += 1
             
-            # Bias term
-            features[0, 6] = 1
+            # Feature 8-16: 3x3 local view centered on current position
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < height and 0 <= nx < width:
+                        features[0, idx] = 1 if maze[ny, nx] == 0 else 0
+                    else:
+                        features[0, idx] = 0  # Out of bounds = wall
+                    idx += 1
+            
+            # Feature 17-20: Directional features (is each direction toward the goal?)
+            # These help the network understand which direction to prefer
+            goal_dy = ty - y
+            goal_dx = tx - x
+            
+            # Right (0, 1) - is goal to the right?
+            features[0, idx] = 1.0 if goal_dx > 0 else (0.0 if goal_dx < 0 else 0.5)
+            idx += 1
+            # Down (1, 0) - is goal below?
+            features[0, idx] = 1.0 if goal_dy > 0 else (0.0 if goal_dy < 0 else 0.5)
+            idx += 1
+            # Left (0, -1) - is goal to the left?
+            features[0, idx] = 1.0 if goal_dx < 0 else (0.0 if goal_dx > 0 else 0.5)
+            idx += 1
+            # Up (-1, 0) - is goal above?
+            features[0, idx] = 1.0 if goal_dy < 0 else (0.0 if goal_dy > 0 else 0.5)
+            idx += 1
+            
+            # Feature 21-22: Normalized distance to target
+            features[0, idx] = (ty - y) / height  # Normalized y direction
+            idx += 1
+            features[0, idx] = (tx - x) / width   # Normalized x direction
+            idx += 1
+            
+            # Feature 23: Progress feature (how far along are we?)
+            # Manhattan distance ratio
+            start_dist = abs(1 - ty) + abs(1 - tx)  # Distance from start to goal
+            current_dist = abs(y - ty) + abs(x - tx)  # Current distance to goal
+            if start_dist > 0:
+                features[0, idx] = 1.0 - (current_dist / start_dist)  # 0 at start, 1 at goal
+            else:
+                features[0, idx] = 1.0
+            idx += 1
+            
+            # Feature 24: Bias term
+            features[0, idx] = 1.0
             
             return features
         
@@ -910,6 +1196,7 @@ if HAS_NUMPY:
             self.visited = set()
             self.previous_state = None
             self.previous_action = None
+            self._clear_distance_cache()  # Clear cache for new maze
             
             # Initialize model if needed
             if self.model is None:
@@ -1021,18 +1308,11 @@ if HAS_NUMPY:
                     
                     # Train the model if in training mode
                     if training_mode and self.previous_state is not None:
-                        # Calculate reward
-                        if (ny, nx) == end:
-                            reward = 1.0  # Reached the goal
-                        else:
-                            # Calculate Manhattan distance change
-                            old_dist = abs(current[0] - end[0]) + abs(current[1] - end[1])
-                            new_dist = abs(ny - end[0]) + abs(nx - end[1])
-                            
-                            if new_dist < old_dist:
-                                reward = 0.5  # Getting closer
-                            else:
-                                reward = -0.2  # Getting farther
+                        # IMPROVED REWARD SHAPING
+                        reward = self._calculate_reward(
+                            current, (ny, nx), end, maze, 
+                            is_new_cell=(ny, nx) not in self.visited
+                        )
                         
                         # Train model
                         self.model.train(self.previous_state, self.previous_action, reward)
@@ -1043,11 +1323,24 @@ if HAS_NUMPY:
                     
                     # CRITICAL VALIDATION: Double-check that target is a white square before adding to path
                     if not (0 <= ny < maze.shape[0] and 
-                            0 <= nx < maze.shape[1] and
-                            maze[ny, nx] == 0):  # MUST be white (0)
-                        # This should never happen, but safety check prevents cheating
-                        cell_value = maze[ny, nx] if (0 <= ny < maze.shape[0] and 0 <= nx < maze.shape[1]) else "out_of_bounds"
-                        print(f"ERROR: Attempted to move to non-white cell (value={cell_value}) at ({ny}, {nx}), blocking move")
+                            0 <= nx < maze.shape[1]):
+                        print(f"🚫 BLOCKED: Out of bounds at ({ny}, {nx})")
+                        # PUNISH: Train with strong negative reward for trying to go out of bounds
+                        if training_mode and self.previous_state is not None:
+                            self.model.train(self.previous_state, action, -2.0)  # Heavy punishment!
+                            print(f"   💀 PUNISHED action {action} with reward -2.0")
+                        break
+                    
+                    cell_value = maze[ny, nx]
+                    if cell_value != 0:  # MUST be white (0)
+                        # CHEATING DETECTED! Punish the AI heavily
+                        print(f"🚫 BLOCKED: Attempted to move to BLACK cell (value={cell_value}) at ({ny}, {nx})")
+                        # PUNISH: Train with strong negative reward for trying to walk through walls
+                        if training_mode:
+                            features = self._get_features(maze, current, end)
+                            self.model.train(features, action, -2.0)  # Heavy punishment!
+                            print(f"   💀 PUNISHED action {action} with reward -2.0 for wall collision")
+                        # Don't continue this path
                         break
                     
                     # Check that move is adjacent (prevent jumping through walls)
@@ -1055,7 +1348,7 @@ if HAS_NUMPY:
                     dx_move = abs(nx - current[1])
                     if dy_move + dx_move != 1:
                         # Invalid move - not adjacent!
-                        print(f"ERROR: Invalid jump from {current} to ({ny}, {nx}), blocking move")
+                        print(f"🚫 BLOCKED: Invalid jump from {current} to ({ny}, {nx})")
                         break
                     
                     # ALL CHECKS PASSED: Move to the white square
@@ -1064,7 +1357,13 @@ if HAS_NUMPY:
                     self.visited.add(current)
                 
                 else:
-                    # Invalid move, try to find a valid one
+                    # Invalid move predicted by NN - PUNISH for predicting wall/out-of-bounds!
+                    if training_mode:
+                        features = self._get_features(maze, current, end)
+                        self.model.train(features, action, -1.5)  # Punish bad prediction
+                        print(f"   💀 PUNISHED predicted action {action} with reward -1.5 (invalid direction)")
+                    
+                    # Try to find a valid one
                     valid_moves = []
                     for i, (dy, dx) in enumerate(directions):
                         ny, nx = current[0] + dy, current[1] + dx
@@ -1087,12 +1386,23 @@ if HAS_NUMPY:
                         self.previous_action = action
                         
                         # CRITICAL VALIDATION: Ensure target is a white square before moving
-                        if not (0 <= ny < maze.shape[0] and 
-                                0 <= nx < maze.shape[1] and
-                                maze[ny, nx] == 0):  # MUST be white (0)
-                            # Should not happen since we validated above, but double-check
-                            cell_value = maze[ny, nx] if (0 <= ny < maze.shape[0] and 0 <= nx < maze.shape[1]) else "out_of_bounds"
-                            print(f"ERROR: Attempted to move to non-white cell (value={cell_value}) at ({ny}, {nx}), blocking move")
+                        if not (0 <= ny < maze.shape[0] and 0 <= nx < maze.shape[1]):
+                            print(f"🚫 BLOCKED: Out of bounds at ({ny}, {nx})")
+                            # PUNISH for trying to go out of bounds
+                            if training_mode:
+                                features = self._get_features(maze, current, end)
+                                self.model.train(features, action, -2.0)
+                                print(f"   💀 PUNISHED action {action} with reward -2.0")
+                            break
+                        
+                        cell_value = maze[ny, nx]
+                        if cell_value != 0:  # MUST be white (0)
+                            print(f"🚫 BLOCKED: Attempted to move to BLACK cell (value={cell_value}) at ({ny}, {nx})")
+                            # PUNISH for trying to walk through walls
+                            if training_mode:
+                                features = self._get_features(maze, current, end)
+                                self.model.train(features, action, -2.0)
+                                print(f"   💀 PUNISHED action {action} with reward -2.0 for wall collision")
                             break
                         
                         # ALL CHECKS PASSED: Move to the white square

@@ -24,6 +24,10 @@ class SelfOptimizer:
         self.optimization_history = []
         self.performance_window = deque(maxlen=20)  # Track last 20 performances
         
+        # Track episode count for time-based decay
+        self.episode_count = 0
+        self.success_streak = 0  # Track consecutive successes
+        
     def optimize(self, reflection_insights, current_performance):
         """
         Optimize training parameters based on reflection insights.
@@ -37,6 +41,13 @@ class SelfOptimizer:
         """
         # Store performance
         self.performance_window.append(current_performance)
+        self.episode_count += 1
+        
+        # Track success streak for exploration decay
+        if current_performance.get('success', False):
+            self.success_streak += 1
+        else:
+            self.success_streak = 0
         
         # Analyze trends
         trend = self._analyze_trend()
@@ -88,7 +99,10 @@ class SelfOptimizer:
     
     def _optimize_learning_rate(self, reflection_insights, trend):
         """
-        Optimize learning rate based on performance.
+        Optimize learning rate with adaptive scheduling.
+        
+        Key insight: Start with moderate LR, increase when struggling,
+        decrease when stable. Don't let it get too high or learning destabilizes.
         
         Args:
             reflection_insights (dict): Reflection insights
@@ -100,21 +114,48 @@ class SelfOptimizer:
         base_lr = self.learning_rate
         adjustments = []
         
+        # Time-based decay component (gradual decrease over time)
+        if self.episode_count > 30:
+            time_decay = -0.0005  # Slight decay after initial learning
+            adjustments.append(time_decay)
+        
         # Adjust based on weaknesses
         weaknesses = reflection_insights.get('weaknesses', [])
         for weakness in weaknesses:
             if weakness['type'] == 'low_efficiency':
-                adjustments.append(0.005)  # Increase LR
+                # Only increase if LR is relatively low
+                if base_lr < 0.03:
+                    adjustments.append(0.003)
+                else:
+                    adjustments.append(0.001)  # Smaller increase if already moderate
             elif weakness['type'] == 'excessive_backtracking':
                 adjustments.append(-0.002)  # Decrease LR for stability
         
         # Adjust based on trend
         if trend == 'improving':
-            # Learning is working, can maintain or slightly increase
-            adjustments.append(0.001)
+            # Learning is working, slight decrease to stabilize
+            adjustments.append(-0.0005)
         elif trend == 'declining':
-            # Learning might be too aggressive, decrease
-            adjustments.append(-0.003)
+            # Learning might be too aggressive or too slow
+            if base_lr > 0.03:
+                adjustments.append(-0.002)  # Too aggressive, slow down
+            elif base_lr < 0.015:
+                adjustments.append(0.002)  # Too slow, speed up
+        elif trend == 'stable':
+            # Stable performance, slight decrease for fine-tuning
+            adjustments.append(-0.0002)
+        
+        # Success streak adjustment
+        if self.success_streak >= 3:
+            # Doing well, can decrease LR for fine-tuning
+            adjustments.append(-0.001)
+        
+        # Efficiency-based adjustment
+        efficiency = reflection_insights.get('efficiency', 0.5)
+        if efficiency > 0.8:
+            adjustments.append(-0.001)  # Very good, fine-tune
+        elif efficiency < 0.1 and base_lr < 0.02:
+            adjustments.append(0.002)  # Very bad, need to learn faster
         
         # Average adjustments
         if adjustments:
@@ -122,15 +163,21 @@ class SelfOptimizer:
         else:
             adjustment = 0
         
-        # Clamp learning rate
+        # Apply adjustment with BETTER bounds
         new_lr = base_lr + adjustment
-        new_lr = max(0.001, min(0.1, new_lr))
+        
+        # CRITICAL: Lower max to 0.05 (was 0.1!)
+        # LR above 0.05 can cause unstable learning with ternary weights
+        new_lr = max(0.002, min(0.05, new_lr))
         
         return new_lr
     
     def _optimize_exploration_rate(self, reflection_insights, trend):
         """
-        Optimize exploration rate.
+        Optimize exploration rate with time-based decay and success-based adjustment.
+        
+        Key insight: High exploration early, but MUST decay over time.
+        The model needs to exploit learned knowledge as training progresses.
         
         Args:
             reflection_insights (dict): Reflection insights
@@ -142,22 +189,47 @@ class SelfOptimizer:
         base_er = self.exploration_rate
         adjustments = []
         
-        # Adjust based on weaknesses
+        # TIME-BASED DECAY: Exploration should decrease over episodes
+        # Formula: decay_factor = 0.995^episode_count (exponential decay)
+        time_decay = 0.995 ** self.episode_count
+        target_from_decay = 0.5 * time_decay  # Start at 0.5, decay toward 0
+        
+        # If current rate is higher than time-decayed target, pull it down
+        if base_er > target_from_decay + 0.1:
+            adjustments.append(-0.02)  # Gradually decrease
+        
+        # SUCCESS STREAK BONUS: If doing well, reduce exploration faster
+        if self.success_streak >= 3:
+            adjustments.append(-0.03)  # Doing well, exploit more
+        elif self.success_streak >= 5:
+            adjustments.append(-0.05)  # Very strong, heavily reduce exploration
+        
+        # Adjust based on weaknesses (but smaller increases now)
         weaknesses = reflection_insights.get('weaknesses', [])
         for weakness in weaknesses:
             if weakness['type'] == 'excessive_backtracking':
-                adjustments.append(-0.05)  # Reduce exploration
+                adjustments.append(-0.03)  # Reduce exploration
             elif weakness['type'] == 'suboptimal_paths':
-                adjustments.append(0.02)  # Slight increase for better exploration
+                # Only slightly increase if we're not already high
+                if base_er < 0.25:
+                    adjustments.append(0.01)
         
         # Adjust based on efficiency
         efficiency = reflection_insights.get('efficiency', 0.5)
-        if efficiency > 0.8:
-            # Doing well, reduce exploration slightly
+        if efficiency > 0.7:
+            # Doing well, reduce exploration
             adjustments.append(-0.02)
-        elif efficiency < 0.4:
-            # Struggling, might need more exploration
-            adjustments.append(0.03)
+        elif efficiency > 0.5:
+            adjustments.append(-0.01)
+        elif efficiency < 0.2 and base_er < 0.25:
+            # Struggling AND exploration is low, might need slight bump
+            adjustments.append(0.01)
+        
+        # Trend-based adjustment
+        if trend == 'improving':
+            adjustments.append(-0.01)  # Keep exploiting what works
+        elif trend == 'declining' and base_er < 0.2:
+            adjustments.append(0.005)  # Tiny exploration bump only if very low
         
         # Average adjustments
         if adjustments:
@@ -165,9 +237,12 @@ class SelfOptimizer:
         else:
             adjustment = 0
         
-        # Clamp exploration rate
+        # Apply adjustment with LOWER bounds
         new_er = base_er + adjustment
-        new_er = max(0.1, min(0.7, new_er))
+        
+        # CRITICAL: Lower max to 0.35 (was 0.7!)
+        # Exploration above 0.35 means too much randomness
+        new_er = max(0.05, min(0.35, new_er))
         
         return new_er
     

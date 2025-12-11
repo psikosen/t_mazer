@@ -263,82 +263,90 @@ class SPICETrainer:
         Validate a solution path and remove any invalid moves (passing through walls).
         Only allows movement through cells with value 0 (paths), rejects any non-zero values.
         
+        STRICT MODE: Every single cell in the path must be white (value 0).
+        
         Args:
             maze (np.ndarray): The maze
             path (list): Proposed solution path
             
         Returns:
-            list: Validated and cleaned path
+            list: Validated and cleaned path (only white cells)
         """
         if not path or len(path) < 2:
             return path if path else []
         
-        validated_path = [path[0]]  # Start position
+        validated_path = []
+        cheating_detected = False
         
-        # Validate start position is a path (value 0)
-        if not (0 <= path[0][0] < maze.shape[0] and 
-                0 <= path[0][1] < maze.shape[1] and
-                maze[path[0][0], path[0][1]] == 0):
-            print(f"Warning: Start position {path[0]} is invalid (out of bounds or wall), using (1,1)")
-            validated_path = [(1, 1)]
-            prev_pos = (1, 1)
-        else:
-            prev_pos = validated_path[-1]
-        
-        for i in range(1, len(path)):
-            curr_pos = path[i]
-            
-            # Check if current position is valid (within bounds)
-            if not (0 <= curr_pos[0] < maze.shape[0] and 
-                    0 <= curr_pos[1] < maze.shape[1]):
-                # Out of bounds, skip this move
-                print(f"Warning: Path attempted to move out of bounds at {curr_pos}, skipping")
+        # First pass: Strictly filter - ONLY keep positions that are white (value 0)
+        for pos in path:
+            # Check bounds
+            if not (0 <= pos[0] < maze.shape[0] and 0 <= pos[1] < maze.shape[1]):
+                cheating_detected = True
                 continue
             
-            # STRICT CHECK: Only allow movement through cells with value 0 (paths)
-            # Any non-zero value (1=wall, or any other value) is an obstacle
-            if maze[curr_pos[0], curr_pos[1]] != 0:
-                # This is an obstacle (wall, grey, black, etc.)! Skip this invalid move
-                cell_value = maze[curr_pos[0], curr_pos[1]]
-                print(f"Warning: Path attempted to pass through obstacle (value={cell_value}) at {curr_pos}, skipping")
+            # STRICT: Cell MUST be white (value 0)
+            cell_value = maze[pos[0], pos[1]]
+            if cell_value != 0:
+                cheating_detected = True
+                print(f"🚫 CHEAT BLOCKED: Attempted to move to black cell (value={cell_value}) at {pos}")
                 continue
             
-            # Check if move is adjacent (only one step away - prevents jumping through walls)
+            validated_path.append(pos)
+        
+        if cheating_detected:
+            print(f"⚠️  Cheating detected and blocked! Original path: {len(path)}, Valid path: {len(validated_path)}")
+        
+        # Second pass: Ensure path is continuous (adjacent moves only)
+        if len(validated_path) < 2:
+            return validated_path
+        
+        continuous_path = [validated_path[0]]
+        prev_pos = validated_path[0]
+        
+        for i in range(1, len(validated_path)):
+            curr_pos = validated_path[i]
+            
+            # Check if move is adjacent
             dy = abs(curr_pos[0] - prev_pos[0])
             dx = abs(curr_pos[1] - prev_pos[1])
             
-            if dy + dx != 1:
-                # Not an adjacent move - this could be jumping through walls
-                # Try to find a valid path between prev and curr
-                intermediate = self._find_valid_path_segment(maze, prev_pos, curr_pos)
-                if intermediate:
-                    # Validate each intermediate step is also a path (value 0)
-                    valid_intermediate = []
-                    for step in intermediate[1:]:  # Skip first as it's prev_pos
-                        if (0 <= step[0] < maze.shape[0] and 
-                            0 <= step[1] < maze.shape[1] and
-                            maze[step[0], step[1]] == 0):
-                            valid_intermediate.append(step)
-                        else:
-                            break  # Stop if we hit an obstacle
-                    
-                    if valid_intermediate:
-                        validated_path.extend(valid_intermediate)
-                        prev_pos = validated_path[-1]
-                    else:
-                        # Can't find valid path, skip this move
-                        print(f"Warning: No valid path found from {prev_pos} to {curr_pos}, skipping")
-                        continue
-                else:
-                    # Can't find valid path, skip this move
-                    print(f"Warning: Invalid jump from {prev_pos} to {curr_pos}, skipping")
-                    continue
-            else:
-                # Valid adjacent move to a path cell (value 0)
-                validated_path.append(curr_pos)
+            if dy + dx == 1:
+                # Valid adjacent move
+                continuous_path.append(curr_pos)
                 prev_pos = curr_pos
+            elif dy + dx == 0:
+                # Same position, skip duplicate
+                continue
+            else:
+                # Non-adjacent: try to fill in the gap with BFS
+                intermediate = self._find_valid_path_segment(maze, prev_pos, curr_pos)
+                if intermediate and len(intermediate) > 1:
+                    # Add intermediate steps (skip first as it's prev_pos)
+                    for step in intermediate[1:]:
+                        # Final check: must be white
+                        if maze[step[0], step[1]] == 0:
+                            continuous_path.append(step)
+                        else:
+                            print(f"🚫 BFS returned non-white cell at {step}, stopping")
+                            break
+                    if continuous_path[-1] == curr_pos:
+                        prev_pos = curr_pos
+                    else:
+                        prev_pos = continuous_path[-1]
+                # If no valid intermediate path, we skip to next valid position
         
-        return validated_path
+        # Final verification: double-check entire path is on white cells
+        final_path = []
+        for pos in continuous_path:
+            if (0 <= pos[0] < maze.shape[0] and 
+                0 <= pos[1] < maze.shape[1] and 
+                maze[pos[0], pos[1]] == 0):
+                final_path.append(pos)
+            else:
+                print(f"🚫 FINAL CHECK: Blocked non-white cell at {pos}")
+        
+        return final_path
     
     def _adjust_maze_parameters(self, episode_num):
         """
